@@ -42,3 +42,12 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+
+monitoramento/exporter.my.cnf
+
+# Arquivos locais de monitoramento
+data/
+monitoramento/mysqld_exporter-*/
+monitoramento/prometheus-*/
+server.js.backup

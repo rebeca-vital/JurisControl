@@ -1,35 +1,142 @@
-
 const express = require("express");
 const cors = require("cors");
+const {
+  Registry,
+  collectDefaultMetrics,
+  Counter,
+  Histogram,
+} = require("prom-client");
+
 require("dotenv").config();
 
 const conexao = require("./db");
 
 const app = express();
 
+// ==========================================
+// MONITORAMENTO DA APLICACAO - PROMETHEUS
+// ==========================================
+
+const registroMetricas = new Registry();
+
+registroMetricas.setDefaultLabels({
+  aplicacao: "juriscontrol",
+});
+
+collectDefaultMetrics({
+  register: registroMetricas,
+  prefix: "juriscontrol_",
+});
+
+// Contador de requisicoes HTTP
+const requisicoesHttp = new Counter({
+  name: "juriscontrol_http_requisicoes_total",
+  help: "Total de requisicoes HTTP recebidas pela aplicacao.",
+  labelNames: ["metodo", "rota", "status"],
+  registers: [registroMetricas],
+});
+
+// Tempo de resposta das requisicoes
+const duracaoRequisicoes = new Histogram({
+  name: "juriscontrol_http_duracao_segundos",
+  help: "Duracao das requisicoes HTTP em segundos.",
+  labelNames: ["metodo", "rota", "status"],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+  registers: [registroMetricas],
+});
+
+// ==========================================
+// CONFIGURACOES DO EXPRESS
+// ==========================================
+
 app.use(cors());
 app.use(express.json());
 
-// ROTA INICIAL
-app.get("/", (req, res) => {
-  res.json({ mensagem: "API JurisControl funcionando!" });
+// ==========================================
+// COLETA DAS METRICAS HTTP
+// ==========================================
+
+app.use((req, res, next) => {
+  if (req.path === "/metrics") {
+    return next();
+  }
+
+  const inicio = process.hrtime.bigint();
+
+  res.on("finish", () => {
+    const rotaDefinida = req.route?.path;
+
+    const rota = rotaDefinida
+      ? `${req.baseUrl || ""}${
+          Array.isArray(rotaDefinida)
+            ? rotaDefinida.join("|")
+            : rotaDefinida
+        }`
+      : "rota_nao_identificada";
+
+    const etiquetas = {
+      metodo: req.method,
+      rota,
+      status: String(res.statusCode),
+    };
+
+    requisicoesHttp.inc(etiquetas);
+
+    const duracao =
+      Number(process.hrtime.bigint() - inicio) / 1e9;
+
+    duracaoRequisicoes.observe(etiquetas, duracao);
+  });
+
+  next();
 });
 
+// ==========================================
+// ENDPOINT DE METRICAS DO PROMETHEUS
+// ==========================================
+
+app.get("/metrics", async (req, res) => {
+  try {
+    res.set("Content-Type", registroMetricas.contentType);
+    res.end(await registroMetricas.metrics());
+  } catch (erro) {
+    console.error("Erro ao gerar metricas:", erro);
+    res.status(500).end("Erro ao gerar metricas.");
+  }
+});
+
+// ==========================================
+// ROTA INICIAL
+// ==========================================
+
+app.get("/", (req, res) => {
+  res.json({
+    mensagem: "API JurisControl funcionando!",
+  });
+});
+
+// ==========================================
 // PAINEL
+// ==========================================
+
 app.get("/painel", async (req, res) => {
   try {
     const [clientes] = await conexao.query(
       "SELECT COUNT(*) AS total FROM clientes"
     );
+
     const [processos] = await conexao.query(
       "SELECT COUNT(*) AS total FROM processos"
     );
+
     const [tarefas] = await conexao.query(
       "SELECT COUNT(*) AS total FROM tarefas"
     );
+
     const [pendentes] = await conexao.query(
       "SELECT COUNT(*) AS total FROM tarefas WHERE situacao = 'Pendente'"
     );
+
     const [concluidas] = await conexao.query(
       "SELECT COUNT(*) AS total FROM tarefas WHERE situacao = 'Concluída'"
     );
@@ -43,24 +150,35 @@ app.get("/painel", async (req, res) => {
     });
   } catch (erro) {
     console.error("Erro no painel:", erro);
-    res.status(500).json({ mensagem: "Erro ao carregar o painel." });
+    res.status(500).json({
+      mensagem: "Erro ao carregar o painel.",
+    });
   }
 });
 
+// ==========================================
 // CLIENTES - LISTAR ATIVOS E INATIVOS
+// ==========================================
+
 app.get("/clientes", async (req, res) => {
   try {
     const [resultado] = await conexao.query(
       "SELECT * FROM clientes ORDER BY id DESC"
     );
+
     res.json(resultado);
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao listar clientes." });
+    res.status(500).json({
+      mensagem: "Erro ao listar clientes.",
+    });
   }
 });
 
+// ==========================================
 // CLIENTES - CADASTRAR
+// ==========================================
+
 app.post("/clientes", async (req, res) => {
   try {
     const { nome, email, telefone } = req.body;
@@ -83,11 +201,16 @@ app.post("/clientes", async (req, res) => {
     });
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao cadastrar cliente." });
+    res.status(500).json({
+      mensagem: "Erro ao cadastrar cliente.",
+    });
   }
 });
 
+// ==========================================
 // CLIENTES - EDITAR DADOS
+// ==========================================
+
 app.put("/clientes/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -113,24 +236,38 @@ app.put("/clientes/:id", async (req, res) => {
       );
 
       if (existente.length === 0) {
-        return res.status(404).json({ mensagem: "Cliente não encontrado." });
+        return res.status(404).json({
+          mensagem: "Cliente não encontrado.",
+        });
       }
     }
 
-    res.json({ mensagem: "Cliente atualizado com sucesso." });
+    res.json({
+      mensagem: "Cliente atualizado com sucesso.",
+    });
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao atualizar cliente." });
+    res.status(500).json({
+      mensagem: "Erro ao atualizar cliente.",
+    });
   }
 });
 
+// ==========================================
 // CLIENTES - INATIVAR OU REATIVAR
+// ==========================================
+
 app.patch("/clientes/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
     const { ativo } = req.body;
 
-    if (ativo !== 0 && ativo !== 1 && ativo !== false && ativo !== true) {
+    if (
+      ativo !== 0 &&
+      ativo !== 1 &&
+      ativo !== false &&
+      ativo !== true
+    ) {
       return res.status(400).json({
         mensagem: "Informe uma situação válida para o cliente.",
       });
@@ -148,7 +285,9 @@ app.patch("/clientes/:id/status", async (req, res) => {
       );
 
       if (existente.length === 0) {
-        return res.status(404).json({ mensagem: "Cliente não encontrado." });
+        return res.status(404).json({
+          mensagem: "Cliente não encontrado.",
+        });
       }
     }
 
@@ -159,12 +298,18 @@ app.patch("/clientes/:id/status", async (req, res) => {
     });
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao alterar situação do cliente." });
+    res.status(500).json({
+      mensagem: "Erro ao alterar situação do cliente.",
+    });
   }
 });
 
+// ==========================================
 // CLIENTES - EXCLUSÃO PROTEGIDA
+// ==========================================
+
 // A exclusão definitiva foi substituída pela inativação.
+
 app.delete("/clientes/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -181,18 +326,27 @@ app.delete("/clientes/:id", async (req, res) => {
       );
 
       if (existente.length === 0) {
-        return res.status(404).json({ mensagem: "Cliente não encontrado." });
+        return res.status(404).json({
+          mensagem: "Cliente não encontrado.",
+        });
       }
     }
 
-    res.json({ mensagem: "Cliente inativado. O histórico foi preservado." });
+    res.json({
+      mensagem: "Cliente inativado. O histórico foi preservado.",
+    });
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao inativar cliente." });
+    res.status(500).json({
+      mensagem: "Erro ao inativar cliente.",
+    });
   }
 });
 
+// ==========================================
 // PROCESSOS - LISTAR
+// ==========================================
+
 app.get("/processos", async (req, res) => {
   try {
     const [resultado] = await conexao.query(`
@@ -208,14 +362,25 @@ app.get("/processos", async (req, res) => {
     res.json(resultado);
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao listar processos." });
+    res.status(500).json({
+      mensagem: "Erro ao listar processos.",
+    });
   }
 });
 
+// ==========================================
 // PROCESSOS - CADASTRAR
+// ==========================================
+
 app.post("/processos", async (req, res) => {
   try {
-    const { numero, titulo, area, status, cliente_id } = req.body;
+    const {
+      numero,
+      titulo,
+      area,
+      status,
+      cliente_id,
+    } = req.body;
 
     if (!numero || !titulo || !cliente_id) {
       return res.status(400).json({
@@ -272,15 +437,27 @@ app.post("/processos", async (req, res) => {
       });
     }
 
-    res.status(500).json({ mensagem: "Erro ao cadastrar processo." });
+    res.status(500).json({
+      mensagem: "Erro ao cadastrar processo.",
+    });
   }
 });
 
+// ==========================================
 // PROCESSOS - EDITAR
+// ==========================================
+
 app.put("/processos/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { numero, titulo, area, status, cliente_id } = req.body;
+
+    const {
+      numero,
+      titulo,
+      area,
+      status,
+      cliente_id,
+    } = req.body;
 
     if (!numero || !titulo || !cliente_id) {
       return res.status(400).json({
@@ -300,6 +477,7 @@ app.put("/processos/:id", async (req, res) => {
     }
 
     const clienteAtual = processosExistentes[0].cliente_id;
+
     const [clientes] = await conexao.query(
       "SELECT id, ativo FROM clientes WHERE id = ?",
       [cliente_id]
@@ -313,7 +491,11 @@ app.put("/processos/:id", async (req, res) => {
 
     // Permite manter o cliente inativo já vinculado ao processo,
     // mas não permite vinculá-lo a outro processo.
-    if (clientes[0].ativo !== 1 && Number(cliente_id) !== Number(clienteAtual)) {
+
+    if (
+      clientes[0].ativo !== 1 &&
+      Number(cliente_id) !== Number(clienteAtual)
+    ) {
       return res.status(400).json({
         mensagem: "Não é possível vincular um cliente inativo a outro processo.",
       });
@@ -333,7 +515,9 @@ app.put("/processos/:id", async (req, res) => {
       ]
     );
 
-    res.json({ mensagem: "Processo atualizado com sucesso." });
+    res.json({
+      mensagem: "Processo atualizado com sucesso.",
+    });
   } catch (erro) {
     console.error(erro);
 
@@ -349,11 +533,16 @@ app.put("/processos/:id", async (req, res) => {
       });
     }
 
-    res.status(500).json({ mensagem: "Erro ao atualizar processo." });
+    res.status(500).json({
+      mensagem: "Erro ao atualizar processo.",
+    });
   }
 });
 
+// ==========================================
 // PROCESSOS - EXCLUIR
+// ==========================================
+
 app.delete("/processos/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -369,14 +558,21 @@ app.delete("/processos/:id", async (req, res) => {
       });
     }
 
-    res.json({ mensagem: "Processo excluído com sucesso." });
+    res.json({
+      mensagem: "Processo excluído com sucesso.",
+    });
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao excluir processo." });
+    res.status(500).json({
+      mensagem: "Erro ao excluir processo.",
+    });
   }
 });
 
+// ==========================================
 // TAREFAS - LISTAR
+// ==========================================
+
 app.get("/tarefas", async (req, res) => {
   try {
     const [resultado] = await conexao.query(`
@@ -391,16 +587,26 @@ app.get("/tarefas", async (req, res) => {
     res.json(resultado);
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao listar tarefas." });
+    res.status(500).json({
+      mensagem: "Erro ao listar tarefas.",
+    });
   }
 });
 
+// ==========================================
 // TAREFAS - CADASTRAR
+// ==========================================
+
 app.post("/tarefas", async (req, res) => {
   try {
     const {
-      titulo, descricao, responsavel, prazo,
-      prioridade, situacao, processo_id,
+      titulo,
+      descricao,
+      responsavel,
+      prazo,
+      prioridade,
+      situacao,
+      processo_id,
     } = req.body;
 
     if (!titulo) {
@@ -437,17 +643,28 @@ app.post("/tarefas", async (req, res) => {
       });
     }
 
-    res.status(500).json({ mensagem: "Erro ao cadastrar tarefa." });
+    res.status(500).json({
+      mensagem: "Erro ao cadastrar tarefa.",
+    });
   }
 });
 
+// ==========================================
 // TAREFAS - EDITAR
+// ==========================================
+
 app.put("/tarefas/:id", async (req, res) => {
   try {
     const { id } = req.params;
+
     const {
-      titulo, descricao, responsavel, prazo,
-      prioridade, situacao, processo_id,
+      titulo,
+      descricao,
+      responsavel,
+      prazo,
+      prioridade,
+      situacao,
+      processo_id,
     } = req.body;
 
     if (!titulo) {
@@ -486,7 +703,9 @@ app.put("/tarefas/:id", async (req, res) => {
       }
     }
 
-    res.json({ mensagem: "Tarefa atualizada com sucesso." });
+    res.json({
+      mensagem: "Tarefa atualizada com sucesso.",
+    });
   } catch (erro) {
     console.error(erro);
 
@@ -496,11 +715,16 @@ app.put("/tarefas/:id", async (req, res) => {
       });
     }
 
-    res.status(500).json({ mensagem: "Erro ao atualizar tarefa." });
+    res.status(500).json({
+      mensagem: "Erro ao atualizar tarefa.",
+    });
   }
 });
 
+// ==========================================
 // TAREFAS - EXCLUIR
+// ==========================================
+
 app.delete("/tarefas/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -516,18 +740,27 @@ app.delete("/tarefas/:id", async (req, res) => {
       });
     }
 
-    res.json({ mensagem: "Tarefa excluída com sucesso." });
+    res.json({
+      mensagem: "Tarefa excluída com sucesso.",
+    });
   } catch (erro) {
     console.error(erro);
-    res.status(500).json({ mensagem: "Erro ao excluir tarefa." });
+    res.status(500).json({
+      mensagem: "Erro ao excluir tarefa.",
+    });
   }
 });
 
+// ==========================================
 // INICIAR SERVIDOR
+// ==========================================
+
 async function iniciarServidor() {
   try {
     const conexaoTeste = await conexao.getConnection();
+
     console.log("Conexão com MySQL estabelecida!");
+
     conexaoTeste.release();
 
     const PORTA = process.env.PORT || 3001;
